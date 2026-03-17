@@ -2,7 +2,7 @@
 
 将抖音 Windows 桌面客户端调整为更接近纯播放器的沉浸式全屏模式，尽量隐藏播放无关 UI，仅保留视频主体与弹幕。
 
-![Windows](https://img.shields.io/badge/平台-Windows-0078d4) ![Douyin](https://img.shields.io/badge/抖音桌面端-7.4.x-fe2c55)
+![Windows](https://img.shields.io/badge/平台-Windows-0078d4) ![Douyin](https://img.shields.io/badge/抖音桌面端-7.4.x~7.5.x-fe2c55)
 
 ## 效果
 
@@ -25,7 +25,7 @@
 
 ### 方式一：preload.js 直接注入（推荐）
 
-当前测试的抖音 7.4.x 版本中，`app.asar.unpacked/preload.js` 可以直接修改，无需先解包 ASAR。
+抖音 7.4.x ~ 7.5.x 版本中，`app.asar.unpacked/preload.js` 可以直接修改，无需先解包 ASAR。
 
 1. **关闭抖音**（包括守护进程）
 2. **首次注入**（需管理员权限）
@@ -77,7 +77,7 @@ powershell -ExecutionPolicy Bypass -File apply_preload_patch.ps1
 
 - ⚠️ 抖音更新后可能需要重新注入（版本目录路径会变）
 - ⚠️ 需要管理员权限修改 Program Files 下的文件
-- ⚠️ 仅在 Windows 抖音桌面端 7.4.x 上测试过
+- ⚠️ 已在 Windows 抖音桌面端 7.4.x ~ 7.5.x 上测试
 - 本项目仅用于个人使用体验优化，不涉及任何数据抓取或破解行为
 
 ## License
