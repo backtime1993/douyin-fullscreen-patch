@@ -1,8 +1,8 @@
-# 抖音桌面端 真全屏补丁
+# 抖音桌面端 真全屏补丁 + 清屏保持
 
-将抖音 Windows 桌面客户端调整为更接近纯播放器的沉浸式全屏模式，尽量隐藏播放无关 UI，仅保留视频主体与弹幕。
+将抖音 Windows 桌面客户端调整为更接近纯播放器的沉浸式全屏模式，尽量隐藏播放无关 UI，仅保留视频主体与弹幕。同时附带"清屏模式保持开启"模块，解决原生清屏开关在切换视频时被重置的问题。
 
-![Windows](https://img.shields.io/badge/平台-Windows-0078d4) ![Douyin](https://img.shields.io/badge/抖音桌面端-7.4.x~7.5.x-fe2c55)
+![Windows](https://img.shields.io/badge/平台-Windows-0078d4) ![Douyin](https://img.shields.io/badge/抖音桌面端-7.4.x~7.7.x-fe2c55)
 
 ## 效果
 
@@ -11,15 +11,19 @@
 - 💬 **保留弹幕** — 默认保留弹幕，其余覆盖层尽量隐藏
 - 🖱️ **自动隐藏光标** — 2.5 秒无操作后光标和切换按钮自动淡出
 - ⌨️ **快捷键** — `F` 切换全屏 / `Escape` 退出
+- 🧼 **清屏保持开启** — 抖音原生"清屏"开关默认开启，且切视频后自动补开（独立模块，与真全屏正交）
+- 🔁 **自动伴随抖音更新** — 配套的 `douyin_patch_watcher.py` 守护进程监听抖音安装目录，检测到新版本后自动重新注入
 
 ## 文件说明
 
 | 文件 | 用途 |
 |------|------|
-| `fullscreen_payload.js` | 核心注入脚本，包含 CSS + JS 全部逻辑 |
+| `fullscreen_payload.js` | 核心注入脚本，包含 CSS + JS 全部逻辑（真全屏模块 + 清屏保持模块） |
 | `patch_preload.ps1` | **首次注入**：自动查找最新版抖音目录；若当前文件尚未打补丁，会先创建版本绑定备份再注入 |
 | `apply_preload_patch.ps1` | **热更新**：只替换已注入的 payload 部分，无需重新备份 |
 | `patch_douyin.ps1` | **ASAR 方式**：解包 app.asar → 注入 → 重新打包（需要 npm/npx，重复执行不会叠加注入） |
+| `douyin_patch_watcher.py` | **守护进程**：watchdog 监听抖音版本目录，检测到新版本后自动 gsudo 调用 `patch_preload.ps1` 重注入 |
+| `ecosystem.config.js` | PM2 配置，托管 watcher 开机自启 |
 
 ## 使用方法
 
@@ -64,6 +68,41 @@ powershell -ExecutionPolicy Bypass -File apply_preload_patch.ps1
 
 以上三个脚本默认都会从仓库当前目录读取 `fullscreen_payload.js`，clone 后无需再手动复制到 `C:\temp\douyin_patch\`。
 
+## 清屏保持模块
+
+抖音原生的"清屏"开关位于播放器底部控件栏右侧，开启后会隐藏右侧互动按钮、底部作者信息等。但抖音默认会在切换视频时重置这个开关。
+
+本模块的做法：在 `fullscreen_payload.js` 末尾追加了一个独立 IIFE，在渲染进程里寻找 `xg-icon.xgplayer-immersive-switch-setting button.xg-switch` 元素，通过以下三重触发保证它始终带 `xg-switch-checked` 状态：
+
+1. 页面初次加载后延迟检查
+2. 监听 `<video>` 的 `loadstart` 事件作为切视频信号
+3. `MutationObserver` + `setInterval(1500ms)` 兜底
+
+点击触发优先调用 React props 上的 `onClick` handler，避免 `isTrusted=false` 的合成事件被拦截；失败时降级为 `dispatchEvent(pointerdown/mousedown/mouseup/click)` 序列。
+
+抖音 DOM 里通常同时存在多个 `<xgplayer>` 实例（当前播放 + 预加载下一个），模块会对所有实例的 switch 都做一次检查，避免切到预加载的那一个时状态又回到 off。
+
+payload 顶部 `var DEBUG = false;` 改成 `true` 后会把详细探测日志写到 `%TEMP%\douyin-clean-probe.log`，用于调试新版本的 DOM 兼容性。
+
+## 伴随抖音自动更新
+
+`douyin_patch_watcher.py` 是一个 uv PEP 723 脚本，用 `watchdog` 递归监听 `C:\Program Files (x86)\ByteDance\douyin\`：
+
+- 检测到新版本目录下 `preload.js` 的 create/modify 事件 → 3s 防抖 → 等待文件大小稳定 → 检查 marker 是否存在 → 不存在就 `gsudo powershell -File patch_preload.ps1` 自动注入
+- 启动时立即全量巡检一次（补偿 watcher 没跑时已经发生的更新）
+- 每 5 分钟兜底轮询一次
+- 日志写到 `F:\claude\logs\douyin-patch-watcher.log`
+
+**PM2 托管**（开机自启）：
+
+```bash
+cd F:/claude/longterm/douyin-fullscreen-patch
+pm2 start ecosystem.config.js
+pm2 save
+```
+
+第一次调用 `patch_preload.ps1` 时 gsudo 会弹一次 UAC，主人确认后续自动沉默。
+
 ## 技术原理
 
 - 通过修改 Electron 的 `preload.js`，在渲染进程加载时注入自定义脚本
@@ -72,12 +111,13 @@ powershell -ExecutionPolicy Bypass -File apply_preload_patch.ps1
 - `setInterval` 每 500ms 强制覆盖抖音 JS 动态设置的内联 style
 - `requestAnimationFrame` 帧循环 + `elementFromPoint` 探测动态生成的浮层（搜索栏、推荐按钮等）
 - 退出全屏时完整还原所有修改，不留副作用
+- 清屏保持模块通过读写 React fiber 的 `__reactProps$*.onClick` 直接触发原生 handler
 
 ## 注意事项
 
-- ⚠️ 抖音更新后可能需要重新注入（版本目录路径会变）
-- ⚠️ 需要管理员权限修改 Program Files 下的文件
-- ⚠️ 已在 Windows 抖音桌面端 7.4.x ~ 7.5.x 上测试
+- ⚠️ 抖音更新后会自动重注入（需要 watcher 常驻运行），版本目录路径变化由 watcher 解决
+- ⚠️ 需要管理员权限修改 Program Files 下的文件（gsudo 或直接 elevated）
+- ⚠️ 已在 Windows 抖音桌面端 7.4.x ~ 7.7.x 上测试
 - 本项目仅用于个人使用体验优化，不涉及任何数据抓取或破解行为
 
 ## License

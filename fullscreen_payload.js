@@ -695,3 +695,302 @@ body.dyfs.cursor-hidden * { cursor: none !important; }
     }, 200);
   }
 })();
+
+// ═══════════════════════════════════════════════════════════════════
+// DOUYIN CLEAN MODE PERSISTENCE MODULE
+// 让"清屏"开关默认开启，切视频后不被重置
+// ═══════════════════════════════════════════════════════════════════
+(function cleanModeModule() {
+  'use strict';
+
+  try {
+    var wn = process.argv.find(function (a) { return a.startsWith('--window-name='); });
+    if (wn && !wn.includes('MAIN_WINDOW')) return;
+  } catch (e) {}
+
+  // DEBUG=true 时才把探测日志写入磁盘。生产版本只保留 click 事件。
+  var DEBUG = false;
+  var PROBE_LOG = null;
+  try {
+    if (DEBUG) {
+      var os = require('os');
+      var path = require('path');
+      PROBE_LOG = path.join(os.tmpdir(), 'douyin-clean-probe.log');
+    }
+  } catch (e) {}
+
+  function log() {
+    var args = Array.prototype.slice.call(arguments);
+    try { console.log.apply(console, ['[CLEAN-MODE]'].concat(args)); } catch (e) {}
+    if (PROBE_LOG) {
+      try {
+        var line = new Date().toISOString() + ' ' + args.map(function (a) {
+          try { return typeof a === 'string' ? a : JSON.stringify(a); } catch (e) { return String(a); }
+        }).join(' ') + '\n';
+        require('fs').appendFileSync(PROBE_LOG, line);
+      } catch (e) {}
+    }
+  }
+
+  // ── 状态快照（避免短时间内重复点击） ──
+  var lastActionAt = 0;
+  var ACTION_COOLDOWN_MS = 800;
+
+  // ── 查找所有清屏按钮（基于 7.7.0 探测结果的精确选择器） ──
+  // DOM 结构：
+  //   xg-icon.xgplayer-immersive-switch-setting.immersive-switch
+  //     └─ div.xgplayer-icon
+  //        └─ div.xgplayer-setting-label
+  //           ├─ button.xg-switch[.xg-switch-checked]  ← 目标
+  //           └─ span.xgplayer-setting-title ("清屏")
+  // 注意：抖音有多个播放器实例（active + 预加载的 inactive），都要处理
+  function findAllCleanButtons() {
+    var btns = document.querySelectorAll(
+      'xg-icon.xgplayer-immersive-switch-setting button.xg-switch, ' +
+      '[class*="immersive-switch"] button.xg-switch'
+    );
+    return Array.prototype.slice.call(btns);
+  }
+
+  function findCleanButton() {
+    var all = findAllCleanButtons();
+    return all[0] || null;
+  }
+
+  // ── 判断清屏是否已开启（基于 xg-switch-checked class） ──
+  function isCleanOn(btn) {
+    if (!btn) return null;
+    var cls = ((btn.className || '') + '');
+    if (cls.indexOf('xg-switch-checked') >= 0) return true;
+    // 兄弟元素（xg-switch 的同级 label/title）有 checked 标记
+    var parent = btn.parentElement;
+    if (parent && (parent.className + '').indexOf('checked') >= 0) return true;
+    return false;
+  }
+
+  // ── 向上遍历找 React onClick handler ──
+  function findReactOnClick(el) {
+    var cur = el;
+    for (var depth = 0; depth < 6 && cur && cur !== document.body; depth++) {
+      try {
+        var keys = Object.keys(cur);
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          if (k.indexOf('__reactProps$') === 0 || k.indexOf('__reactEventHandlers$') === 0) {
+            var props = cur[k];
+            if (props && typeof props.onClick === 'function') {
+              return { fn: props.onClick, el: cur, depth: depth };
+            }
+          }
+        }
+      } catch (e) {}
+      cur = cur.parentElement;
+    }
+    return null;
+  }
+
+  // ── 模拟点击（优先 React onClick handler） ──
+  function clickButton(btn) {
+    if (!btn) return false;
+    var found = findReactOnClick(btn);
+    if (found) {
+      try {
+        var evt = {
+          type: 'click',
+          target: btn,
+          currentTarget: found.el,
+          preventDefault: function () {},
+          stopPropagation: function () {},
+          isTrusted: true,
+          nativeEvent: new MouseEvent('click', { bubbles: true, cancelable: true })
+        };
+        found.fn(evt);
+        log('click via React onClick depth=' + found.depth + ' el=' + (found.el.tagName || '?'));
+        return true;
+      } catch (e) { log('react click err', String(e)); }
+    }
+
+    // Fallback: 合成 DOM 事件序列（冒泡到 React root）
+    try {
+      ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function (t) {
+        var Ctor = t.indexOf('pointer') === 0 ? (window.PointerEvent || MouseEvent) : MouseEvent;
+        btn.dispatchEvent(new Ctor(t, { bubbles: true, cancelable: true, view: window }));
+      });
+      log('click via dispatchEvent');
+      return true;
+    } catch (e) {
+      try { btn.click(); log('click via .click()'); return true; }
+      catch (e2) { log('click all failed', String(e2)); return false; }
+    }
+  }
+
+  // ── 核心：确保所有播放器实例的清屏开启 ──
+  var PROBE_ONLY = false;
+  function ensureCleanMode() {
+    if (PROBE_ONLY) return;
+    var now = Date.now();
+    if (now - lastActionAt < ACTION_COOLDOWN_MS) return;
+    var btns = findAllCleanButtons();
+    if (!btns.length) return;
+    var clickedAny = false;
+    for (var i = 0; i < btns.length; i++) {
+      var btn = btns[i];
+      if (isCleanOn(btn) === false) {
+        var ok = clickButton(btn);
+        if (ok) {
+          clickedAny = true;
+          log('清屏[' + i + '/' + btns.length + '] 关→开', 'cls=' + (btn.className || '').slice(0, 60));
+        }
+      }
+    }
+    if (clickedAny) lastActionAt = now;
+  }
+
+  // ── 深度探测：收集所有可能的清屏候选 ──
+  function nodePath(el, depth) {
+    if (!el) return '';
+    var parts = [];
+    var cur = el;
+    for (var i = 0; i < (depth || 4) && cur && cur !== document.body; i++) {
+      var seg = cur.tagName.toLowerCase();
+      if (cur.className) seg += '.' + (cur.className + '').split(/\s+/).filter(Boolean).slice(0, 3).join('.');
+      if (cur.getAttribute && cur.getAttribute('data-e2e')) seg += '[data-e2e=' + cur.getAttribute('data-e2e') + ']';
+      parts.unshift(seg);
+      cur = cur.parentElement;
+    }
+    return parts.join(' > ');
+  }
+
+  function describeEl(el) {
+    if (!el) return null;
+    var r = el.getBoundingClientRect ? el.getBoundingClientRect() : { x: 0, y: 0, width: 0, height: 0 };
+    var cs = null;
+    try { cs = getComputedStyle(el); } catch (e) {}
+    return {
+      tag: el.tagName,
+      cls: (el.className || '').toString().slice(0, 180),
+      dataE2e: el.getAttribute && el.getAttribute('data-e2e'),
+      ariaChecked: el.getAttribute && el.getAttribute('aria-checked'),
+      role: el.getAttribute && el.getAttribute('role'),
+      text: (el.textContent || '').trim().slice(0, 40),
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+      bg: cs && cs.backgroundColor,
+      path: nodePath(el, 5),
+      reactKeys: Object.keys(el).filter(function (k) { return k.indexOf('__react') === 0; }).slice(0, 3)
+    };
+  }
+
+  function probeDetailed() {
+    if (!DEBUG || !PROBE_LOG) return;
+    try {
+      // 1. 所有文字 === "清屏" 的候选
+      var candidates = [];
+      var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+        acceptNode: function (n) {
+          return (n.nodeValue || '').trim() === '清屏' ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+        }
+      });
+      var n;
+      while ((n = walker.nextNode())) {
+        var el = n.parentElement;
+        if (!el) continue;
+        candidates.push({
+          el: describeEl(el),
+          parent: describeEl(el.parentElement),
+          grandparent: el.parentElement && describeEl(el.parentElement.parentElement),
+          prevSib: describeEl(el.previousElementSibling),
+          prevSibOfParent: el.parentElement && describeEl(el.parentElement.previousElementSibling),
+          neighbors: Array.from((el.parentElement && el.parentElement.children) || []).map(function (c) {
+            return (c.textContent || '').trim().slice(0, 20);
+          }).filter(Boolean).slice(0, 10)
+        });
+      }
+      log('probe.candidates.count=' + candidates.length);
+      candidates.forEach(function (c, i) {
+        log('probe.candidate[' + i + ']', c);
+      });
+
+      // 2. data-e2e 含 clean/clear 的元素
+      var e2es = document.querySelectorAll('[data-e2e*="clean"],[data-e2e*="clear"]');
+      log('probe.e2e.count=' + e2es.length);
+      e2es.forEach(function (el, i) { log('probe.e2e[' + i + ']', describeEl(el)); });
+
+      // 3. xgplayer 相关控件
+      var xgControls = document.querySelectorAll(
+        '[class*="xgplayer-controls"] [class*="switch"], xg-controls *'
+      );
+      log('probe.xgControls.count=' + xgControls.length);
+
+      // 4. 所有 switch/toggle 元素
+      var switches = document.querySelectorAll('[class*="switch"],[class*="toggle"],[role="switch"]');
+      log('probe.switches.count=' + switches.length);
+      Array.from(switches).slice(0, 15).forEach(function (el, i) {
+        log('probe.switch[' + i + ']', describeEl(el));
+      });
+    } catch (e) { log('probeDetailed err', String(e), e.stack); }
+  }
+
+  // ── 探测快照（每次触发都记录一次，便于调试） ──
+  function probeSnapshot(trigger) {
+    if (!DEBUG || !PROBE_LOG) return;
+    try {
+      var btn = findCleanButton();
+      if (!btn) {
+        log('probe[' + trigger + ']', 'btn not found');
+        return;
+      }
+      var info = {
+        trigger: trigger,
+        tag: btn.tagName,
+        cls: (btn.className || '').toString().slice(0, 200),
+        dataE2e: btn.getAttribute && btn.getAttribute('data-e2e'),
+        parentCls: btn.parentElement && (btn.parentElement.className || '').toString().slice(0, 200),
+        reactKeys: Object.keys(btn).filter(function (k) {
+          return k.indexOf('__react') === 0;
+        }),
+        isCleanOnResult: isCleanOn(btn),
+        rect: btn.getBoundingClientRect && (function () {
+          var r = btn.getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        })()
+      };
+      log('probe', info);
+    } catch (e) { log('probe err', String(e)); }
+  }
+
+  // ── 切视频监听：hook <video> 的 loadstart ──
+  function hookVideoLoadStart() {
+    document.addEventListener('loadstart', function (e) {
+      if (e.target && e.target.tagName === 'VIDEO') {
+        setTimeout(ensureCleanMode, 250);
+        setTimeout(ensureCleanMode, 800);
+      }
+    }, true);
+  }
+
+  // ── 启动 ──
+  // 重要：只在首次加载和视频切换时触发 ensureCleanMode，
+  // 不用 MutationObserver/setInterval 兜底，
+  // 否则用户手动关清屏会被立即反弹回去，破坏 UX。
+  function start() {
+    if (!document.body) { setTimeout(start, 200); return; }
+    log('clean-mode-module start, log=', PROBE_LOG || '(no fs)');
+
+    // 首次进入：等 3/6 秒让页面加载完再各触发一次，把默认关的清屏开起来
+    setTimeout(function () { probeSnapshot('initial'); probeDetailed(); ensureCleanMode(); }, 3000);
+    setTimeout(function () { probeDetailed(); ensureCleanMode(); }, 6000);
+
+    // 切视频触发：hook <video> 的 loadstart（hookVideoLoadStart 内部会 200ms + 800ms 各触发一次）
+    hookVideoLoadStart();
+  }
+
+  if (document.body) {
+    setTimeout(start, 100);
+  } else if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    var poll = setInterval(function () {
+      if (document.body) { clearInterval(poll); start(); }
+    }, 200);
+  }
+})();
