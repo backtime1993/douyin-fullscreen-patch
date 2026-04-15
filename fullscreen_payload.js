@@ -849,30 +849,47 @@ body.dyfs.cursor-hidden * { cursor: none !important; }
     }
   }
 
-  // ── 监听主人对 switch 的手动点击，更新 userPref ──
-  function installUserClickListener() {
-    document.addEventListener('click', function (e) {
-      if (isSelfActing()) return;  // 自己触发的忽略
-      var t = e.target;
-      if (!t || !t.closest) return;
-      // 命中清屏开关或其父容器（label/icon）
-      var hit = t.closest(
-        'xg-icon.xgplayer-immersive-switch-setting, ' +
-        '[class*="immersive-switch"]'
-      );
-      if (!hit) return;
-      // 等 React 切换状态后再读取，作为新的 userPref
-      setTimeout(function () {
-        var btn = findCleanButton();
-        if (!btn) return;
-        var nowOn = isCleanOn(btn);
-        var newPref = nowOn ? 'on' : 'off';
-        if (newPref !== getUserPref()) {
-          setUserPref(newPref);
-          log('user 手动切换 → userPref =', newPref);
+  // ── 监听主人对 switch 的手动切换 ──
+  // 注意：xgplayer 的 switch 可能响应 pointerdown/up 而非 click，
+  // click listener 可能收不到。直接用 MutationObserver 看 button.class 的最终变化，
+  // 与事件派发机制无关。
+  function installUserChangeObserver() {
+    try {
+      var mo = new MutationObserver(function (mutations) {
+        if (isSelfActing()) return;  // 自己点的变化忽略
+        for (var i = 0; i < mutations.length; i++) {
+          var m = mutations[i];
+          if (m.type !== 'attributes' || m.attributeName !== 'class') continue;
+          var el = m.target;
+          if (!el || el.tagName !== 'BUTTON') continue;
+          // 必须是清屏开关里的 xg-switch
+          if (!el.closest) continue;
+          var insideCleanSwitch = el.closest(
+            'xg-icon.xgplayer-immersive-switch-setting, [class*="immersive-switch"]'
+          );
+          if (!insideCleanSwitch) continue;
+
+          var oldCls = m.oldValue || '';
+          var newCls = (el.className || '') + '';
+          var wasOn = oldCls.indexOf('xg-switch-checked') >= 0;
+          var nowOn = newCls.indexOf('xg-switch-checked') >= 0;
+          if (wasOn === nowOn) continue;  // checked 状态没变，忽略
+
+          var newPref = nowOn ? 'on' : 'off';
+          if (newPref !== getUserPref()) {
+            setUserPref(newPref);
+            log('user 手动切换 → userPref =', newPref, 'old=' + oldCls.slice(0, 60), 'new=' + newCls.slice(0, 60));
+          }
         }
-      }, 150);
-    }, true);  // capture 模式先于 React 内部 handler
+      });
+      mo.observe(document.body, {
+        attributes: true,
+        attributeFilter: ['class'],
+        attributeOldValue: true,
+        subtree: true,
+      });
+      log('installUserChangeObserver ready');
+    } catch (e) { log('installUserChangeObserver err', String(e)); }
   }
 
   // ── 核心：确保所有播放器实例的清屏开启 ──
@@ -1030,7 +1047,7 @@ body.dyfs.cursor-hidden * { cursor: none !important; }
     if (!document.body) { setTimeout(start, 200); return; }
     log('clean-mode-module start, pref=' + getUserPref(), 'log=', PROBE_LOG || '(no fs)');
 
-    installUserClickListener();
+    installUserChangeObserver();
 
     setTimeout(function () { probeSnapshot('initial'); probeDetailed(); ensureCleanMode(); }, 3000);
     setTimeout(function () { probeDetailed(); ensureCleanMode(); }, 6000);
