@@ -736,6 +736,30 @@ body.dyfs.cursor-hidden * { cursor: none !important; }
   var lastActionAt = 0;
   var ACTION_COOLDOWN_MS = 800;
 
+  // ── 用户偏好：默认 "on"（清屏保持开），主人手动关一次后切到 "off"，后续不再自动开 ──
+  // 跨会话持久化到 localStorage，让主人的偏好重启抖音也能记住。
+  var USER_PREF_KEY = '__douyin_clean_user_pref__';
+  var _cachedPref = null;  // 内存缓存，避免频繁读 localStorage
+  function getUserPref() {
+    if (_cachedPref !== null) return _cachedPref;
+    try {
+      var v = window.localStorage && window.localStorage.getItem(USER_PREF_KEY);
+      _cachedPref = (v === 'off') ? 'off' : 'on';  // 默认 on
+    } catch (e) { _cachedPref = 'on'; }
+    return _cachedPref;
+  }
+  function setUserPref(val) {
+    _cachedPref = val;
+    try {
+      if (window.localStorage) window.localStorage.setItem(USER_PREF_KEY, val);
+    } catch (e) {}
+  }
+
+  // 自身点击标记：ensureCleanMode 触发的点击不应被误判为"主人操作"
+  var _selfActing = 0;
+  function beginSelfAction() { _selfActing = Date.now(); }
+  function isSelfActing() { return Date.now() - _selfActing < 500; }
+
   // ── 查找所有清屏按钮（基于 7.7.0 探测结果的精确选择器） ──
   // DOM 结构：
   //   xg-icon.xgplayer-immersive-switch-setting.immersive-switch
@@ -792,6 +816,7 @@ body.dyfs.cursor-hidden * { cursor: none !important; }
   // ── 模拟点击（优先 React onClick handler） ──
   function clickButton(btn) {
     if (!btn) return false;
+    beginSelfAction();
     var found = findReactOnClick(btn);
     if (found) {
       try {
@@ -824,10 +849,38 @@ body.dyfs.cursor-hidden * { cursor: none !important; }
     }
   }
 
+  // ── 监听主人对 switch 的手动点击，更新 userPref ──
+  function installUserClickListener() {
+    document.addEventListener('click', function (e) {
+      if (isSelfActing()) return;  // 自己触发的忽略
+      var t = e.target;
+      if (!t || !t.closest) return;
+      // 命中清屏开关或其父容器（label/icon）
+      var hit = t.closest(
+        'xg-icon.xgplayer-immersive-switch-setting, ' +
+        '[class*="immersive-switch"]'
+      );
+      if (!hit) return;
+      // 等 React 切换状态后再读取，作为新的 userPref
+      setTimeout(function () {
+        var btn = findCleanButton();
+        if (!btn) return;
+        var nowOn = isCleanOn(btn);
+        var newPref = nowOn ? 'on' : 'off';
+        if (newPref !== getUserPref()) {
+          setUserPref(newPref);
+          log('user 手动切换 → userPref =', newPref);
+        }
+      }, 150);
+    }, true);  // capture 模式先于 React 内部 handler
+  }
+
   // ── 核心：确保所有播放器实例的清屏开启 ──
+  // 如果 userPref === 'off' 直接退出，尊重主人手动关。
   var PROBE_ONLY = false;
   function ensureCleanMode() {
     if (PROBE_ONLY) return;
+    if (getUserPref() === 'off') return;  // 主人手动关过，不再自动开
     var now = Date.now();
     if (now - lastActionAt < ACTION_COOLDOWN_MS) return;
     var btns = findAllCleanButtons();
@@ -969,18 +1022,19 @@ body.dyfs.cursor-hidden * { cursor: none !important; }
   }
 
   // ── 启动 ──
-  // 重要：只在首次加载和视频切换时触发 ensureCleanMode，
-  // 不用 MutationObserver/setInterval 兜底，
-  // 否则用户手动关清屏会被立即反弹回去，破坏 UX。
+  // 触发时机：
+  //   1. 首次加载延迟 3s/6s 各一次（把默认关的清屏开起来）
+  //   2. <video> loadstart 事件（切视频）
+  //   所有触发点内部都会先检查 getUserPref()，主人手动关过就不再自动开。
   function start() {
     if (!document.body) { setTimeout(start, 200); return; }
-    log('clean-mode-module start, log=', PROBE_LOG || '(no fs)');
+    log('clean-mode-module start, pref=' + getUserPref(), 'log=', PROBE_LOG || '(no fs)');
 
-    // 首次进入：等 3/6 秒让页面加载完再各触发一次，把默认关的清屏开起来
+    installUserClickListener();
+
     setTimeout(function () { probeSnapshot('initial'); probeDetailed(); ensureCleanMode(); }, 3000);
     setTimeout(function () { probeDetailed(); ensureCleanMode(); }, 6000);
 
-    // 切视频触发：hook <video> 的 loadstart（hookVideoLoadStart 内部会 200ms + 800ms 各触发一次）
     hookVideoLoadStart();
   }
 
